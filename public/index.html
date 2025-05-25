@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debt Collector - Card Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.70.0/phaser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #1e3c72, #2a5298);
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        
+        #game-container {
+            position: relative;
+        }
+        
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            z-index: 100;
+        }
+        
+        .ui-panel {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 10px;
+            padding: 20px;
+            color: white;
+            pointer-events: auto;
+        }
+        
+        #lobby-panel {
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 400px;
+            text-align: center;
+        }
+        
+        #game-panel {
+            top: 10px;
+            left: 10px;
+            width: 300px;
+            display: none;
+        }
+        
+        #action-panel {
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            text-align: center;
+        }
+        
+        .btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        .btn:hover {
+            background: #45a049;
+        }
+        
+        .btn:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        
+        .btn-danger {
+            background: #f44336;
+        }
+        
+        .btn-danger:hover {
+            background: #da190b;
+        }
+        
+        input {
+            padding: 10px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        
+        .player-list {
+            text-align: left;
+            margin: 10px 0;
+        }
+        
+        .player-item {
+            padding: 5px;
+            margin: 2px 0;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        
+        .current-collector {
+            background: rgba(255, 215, 0, 0.3);
+        }
+        
+        .current-challenger {
+            background: rgba(255, 69, 0, 0.3);
+        }
+        
+        #status-text {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="phaser-game"></div>
+        
+        <div id="ui-overlay">
+            <!-- Lobby Panel -->
+            <div id="lobby-panel" class="ui-panel">
+                <h2>Debt Collector</h2>
+                <div id="lobby-content">
+                    <input type="text" id="player-name" placeholder="Enter your name" maxlength="20">
+                    <br>
+                    <input type="text" id="room-id" placeholder="Room ID (optional)" maxlength="10">
+                    <br>
+                    <button class="btn" onclick="joinRoom()">Join Game</button>
+                </div>
+                
+                <div id="waiting-room" style="display: none;">
+                    <h3>Room: <span id="current-room-id"></span></h3>
+                    <div id="status-text">Waiting for players...</div>
+                    <div class="player-list" id="player-list"></div>
+                    <button class="btn" id="start-button" onclick="startGame()" style="display: none;">Start Game</button>
+                </div>
+            </div>
+            
+            <!-- Game Info Panel -->
+            <div id="game-panel" class="ui-panel">
+                <h3>Game Info</h3>
+                <div id="phase-info">Phase: Waiting</div>
+                <div id="collector-info">Collector: None</div>
+                <div id="pot-info">Pot: 0 cards</div>
+                <div class="player-list" id="game-player-list"></div>
+            </div>
+            
+            <!-- Action Panel -->
+            <div id="action-panel" class="ui-panel">
+                <div id="action-content">
+                    <div id="place-card-ui" style="display: none;">
+                        <p>Select a card to place face down</p>
+                        <div id="card-selection"></div>
+                    </div>
+                    
+                    <div id="challenge-ui" style="display: none;">
+                        <p id="challenge-text">Make your prediction:</p>
+                        <button class="btn" onclick="makeChallenge('higher')">Higher</button>
+                        <button class="btn" onclick="makeChallenge('lower')">Lower</button>
+                    </div>
+                    
+                    <div id="collect-ui" style="display: none;">
+                        <p>You won! Choose your action:</p>
+                        <button class="btn" onclick="continueChallenge()">Continue Challenging</button>
+                        <button class="btn btn-danger" onclick="collectCards()">Collect Cards</button>
+                    </div>
+                    
+                    <div id="waiting-ui">
+                        <p id="waiting-text">Waiting for other players...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Game state
+        let socket;
+        let gameState = 'lobby'; // lobby, playing
+        let playerId;
+        let playerHand = [];
+        let currentGameState = null;
+        let phaserGame;
+
+        // Phaser game configuration
+        const config = {
+            type: Phaser.AUTO,
+            width: 1200,
+            height: 800,
+            parent: 'phaser-game',
+            backgroundColor: '#1a4d2b',
+            scene: {
+                create: create,
+                update: update
+            }
+        };
+
+        // Card sprites and game objects
+        let cardSprites = [];
+        let playedCardSprites = [];
+        let tableCenter;
+
+        function create() {
+            // Create table center
+            tableCenter = this.add.rectangle(600, 400, 200, 200, 0x228B22);
+            tableCenter.setStrokeStyle(3, 0xFFFFFF);
+            
+            this.add.text(600, 400, 'DEBT\nCOLLECTOR', {
+                fontSize: '24px',
+                fill: '#FFFFFF',
+                align: 'center',
+                fontWeight: 'bold'
+            }).setOrigin(0.5);
+        }
+
+        function update() {
+            // Game update logic
+        }
+
+        // Initialize socket connection
+        function initSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            socket = io(`${protocol}//${host}`);
+
+            socket.on('joined_room', (data) => {
+                if (data.success) {
+                    playerId = data.playerId;
+                    document.getElementById('lobby-content').style.display = 'none';
+                    document.getElementById('waiting-room').style.display = 'block';
+                    document.getElementById('current-room-id').textContent = 
+                        document.getElementById('room-id').value || 'AUTO';
+                } else {
+                    alert('Failed to join room: ' + data.reason);
+                }
+            });
+
+            socket.on('game_state', (state) => {
+                currentGameState = state;
+                updateUI();
+            });
+
+            socket.on('game_started', () => {
+                gameState = 'playing';
+                document.getElementById('lobby-panel').style.display = 'none';
+                document.getElementById('game-panel').style.display = 'block';
+                document.getElementById('action-panel').style.display = 'block';
+            });
+
+            socket.on('hand_update', (data) => {
+                playerHand = data.hand;
+                updateHandDisplay();
+            });
+
+            socket.on('challenge_phase', (data) => {
+                updateChallengeUI(data);
+            });
+
+            socket.on('challenge_result', (result) => {
+                handleChallengeResult(result);
+            });
+
+            socket.on('cards_collected', () => {
+                hideAllActionUIs();
+                showWaitingUI('Cards collected! New round starting...');
+            });
+        }
+
+        function joinRoom() {
+            const playerName = document.getElementById('player-name').value.trim();
+            const roomId = document.getElementById('room-id').value.trim() || generateRoomId();
+            
+            if (!playerName) {
+                alert('Please enter your name');
+                return;
+            }
+
+            initSocket();
+            socket.emit('join_room', { roomId, playerName });
+        }
+
+        function generateRoomId() {
+            return Math.random().toString(36).substring(2, 8).toUpperCase();
+        }
+
+        function startGame() {
+            socket.emit('start_game');
+        }
+
+        function updateUI() {
+            if (!currentGameState) return;
+
+            // Update waiting room
+            if (gameState === 'lobby') {
+                updatePlayerList();
+                const canStart = currentGameState.players.length >= 4;
+                document.getElementById('start-button').style.display = canStart ? 'block' : 'none';
+            } else {
+                // Update game UI
+                updateGamePanel();
+                updateActionPanel();
+            }
+        }
+
+        function updatePlayerList() {
+            const playerList = document.getElementById('player-list');
+            playerList.innerHTML = '';
+            
+            currentGameState.players.forEach(player => {
+                const playerDiv = document.createElement('div');
+                playerDiv.className = 'player-item';
+                playerDiv.textContent = player.name;
+                playerList.appendChild(playerDiv);
+            });
+            
+            const statusText = document.getElementById('status-text');
+            statusText.textContent = `Players: ${currentGameState.players.length}/8 (Min: 4)`;
+        }
+
+        function updateGamePanel() {
+            document.getElementById('phase-info').textContent = `Phase: ${currentGameState.roundPhase}`;
+            
+            const collectorPlayer = currentGameState.players.find(p => p.id === currentGameState.currentCollector);
+            document.getElementById('collector-info').textContent = 
+                `Collector: ${collectorPlayer ? collectorPlayer.name : 'None'}`;
+            
+            document.getElementById('pot-info').textContent = `Pot: ${currentGameState.potPileCount} cards`;
+            
+            // Update game player list
+            const gamePlayerList = document.getElementById('game-player-list');
+            gamePlayerList.innerHTML = '';
+            
+            currentGameState.players.forEach(player => {
+                const playerDiv = document.createElement('div');
+                playerDiv.className = 'player-item';
+                
+                if (player.id === currentGameState.currentCollector) {
+                    playerDiv.classList.add('current-collector');
+                }
+                if (player.id === currentGameState.currentChallenger) {
+                    playerDiv.classList.add('current-challenger');
+                }
+                
+                playerDiv.innerHTML = `
+                    <strong>${player.name}</strong><br>
+                    Hand: ${player.handCount} | Collection: ${player.collectionCount}
+                    ${player.hasPlayedCard ? '✓ Played' : ''}
+                `;
+                
+                gamePlayerList.appendChild(playerDiv);
+            });
+        }
+
+        function updateActionPanel() {
+            hideAllActionUIs();
+            
+            if (currentGameState.roundPhase === 'placement') {
+                if (!currentGameState.players.find(p => p.id === playerId)?.hasPlayedCard) {
+                    showPlaceCardUI();
+                } else {
+                    showWaitingUI('Waiting for other players to place cards...');
+                }
+            } else if (currentGameState.roundPhase === 'challenge') {
+                if (currentGameState.currentCollector === playerId) {
+                    showChallengeUI();
+                } else {
+                    showWaitingUI('Waiting for collector to make prediction...');
+                }
+            }
+        }
+
+        function hideAllActionUIs() {
+            document.getElementById('place-card-ui').style.display = 'none';
+            document.getElementById('challenge-ui').style.display = 'none';
+            document.getElementById('collect-ui').style.display = 'none';
+            document.getElementById('waiting-ui').style.display = 'none';
+        }
+
+        function showPlaceCardUI() {
+            document.getElementById('place-card-ui').style.display = 'block';
+            updateHandDisplay();
+        }
+
+        function showChallengeUI() {
+            document.getElementById('challenge-ui').style.display = 'block';
+            const challengerPlayer = currentGameState.players.find(p => p.id === currentGameState.currentChallenger);
+            document.getElementById('challenge-text').textContent = 
+                `Challenging ${challengerPlayer.name}. Predict if your card is higher or lower:`;
+        }
+
+        function showCollectUI() {
+            document.getElementById('collect-ui').style.display = 'block';
+        }
+
+        function showWaitingUI(text) {
+            document.getElementById('waiting-ui').style.display = 'block';
+            document.getElementById('waiting-text').textContent = text;
+        }
+
+        function updateHandDisplay() {
+            const cardSelection = document.getElementById('card-selection');
+            cardSelection.innerHTML = '';
+            
+            playerHand.forEach((card, index) => {
+                const cardBtn = document.createElement('button');
+                cardBtn.className = 'btn';
+                cardBtn.textContent = `${card.value}${getCardSymbol(card.suit)}`;
+                cardBtn.onclick = () => placeCard(index);
+                cardSelection.appendChild(cardBtn);
+            });
+        }
+
+        function getCardSymbol(suit) {
+            const symbols = {
+                'hearts': '♥',
+                'diamonds': '♦',
+                'clubs': '♣',
+                'spades': '♠'
+            };
+            return symbols[suit] || '';
+        }
+
+        function placeCard(cardIndex) {
+            socket.emit('place_card', { cardIndex });
+            playerHand.splice(cardIndex, 1);
+            updateHandDisplay();
+        }
+
+        function makeChallenge(prediction) {
+            socket.emit('make_challenge', { prediction });
+        }
+
+        function continueChallenge() {
+            // Find next player to challenge
+            const currentIndex = currentGameState.players.findIndex(p => p.id === currentGameState.currentChallenger);
+            const nextIndex = (currentIndex + 1) % currentGameState.players.length;
+            const nextPlayer = currentGameState.players[nextIndex];
+            
+            currentGameState.currentChallenger = nextPlayer.id;
+            updateActionPanel();
+        }
+
+        function collectCards() {
+            socket.emit('collect_cards');
+        }
+
+        function handleChallengeResult(result) {
+            if (result.result === 'tie') {
+                showWaitingUI('Tie! Both players need to play new cards...');
+                if (result.needNewCards) {
+                    setTimeout(() => {
+                        currentGameState.roundPhase = 'placement';
+                        updateActionPanel();
+                    }, 2000);
+                }
+            } else if (result.result === 'collector_wins') {
+                if (currentGameState.currentCollector === playerId) {
+                    showCollectUI();
+                } else {
+                    showWaitingUI('Collector won! Waiting for their decision...');
+                }
+            } else if (result.result === 'challenger_wins') {
+                showWaitingUI(`${currentGameState.players.find(p => p.id === result.newCollector)?.name} is now the collector!`);
+                setTimeout(() => {
+                    currentGameState.roundPhase = 'placement';
+                    updateActionPanel();
+                }, 2000);
+            }
+        }
+
+        // Initialize Phaser game
+        window.onload = function() {
+            phaserGame = new Phaser.Game(config);
+        };
+    </script>
+</body>
+</html>
